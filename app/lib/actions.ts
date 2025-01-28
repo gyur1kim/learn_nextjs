@@ -7,45 +7,118 @@ import { redirect } from "next/navigation";
 
 const FormSchema = z.object({
   id: z.string(),
-  customerId: z.string(),
-  amount: z.coerce.number(),
-  status: z.enum(["pending", "paid"]),
+  customerId: z.string({
+    invalid_type_error: "Please select a customer.",
+  }),
+  amount: z.coerce.number().gt(0, { message: "Please enter an amount greater than $0." }),
+  status: z.enum(["pending", "paid"], {
+    invalid_type_error: "Please select an invoice status.",
+  }),
   date: z.string(),
 });
+
+export type State = {
+  errors?: {
+    customerId?: string[];
+    amount?: string[];
+    status?: string[];
+  };
+  message?: string | null;
+};
 
 const CreateInvoice = FormSchema.omit({ id: true, date: true });
 const UpdateInvoice = FormSchema.omit({ id: true, date: true });
 
-export async function createInvoice(formData: FormData) {
-  const { customerId, amount, status } = CreateInvoice.parse({
+export async function createInvoice(prevState: State, formData: FormData) {
+  const validatedFields = CreateInvoice.safeParse({
     customerId: formData.get("customerId"),
     amount: formData.get("amount"),
     status: formData.get("status"),
   });
+
+  // { success: false, error: [Getter] }
+  console.log(validatedFields);
+
+  // If form validation fails, return errors early. Otherwise, continue.
+  if (!validatedFields.success) {
+    /**
+     * Error [ZodError]: [
+        {
+          "code": "invalid_type",
+          "expected": "string",
+          "received": "null",
+          "path": [
+            "customerId"
+          ],
+          "message": "Please select a customer."
+        },
+        {
+          "code": "too_small",
+          "minimum": 0,
+          "type": "number",
+          "inclusive": false,
+          "exact": false,
+          "message": "Please enter an amount greater than $0.",
+          "path": [
+            "amount"
+          ]
+        },
+        {
+          "expected": "'pending' | 'paid'",
+          "received": "null",
+          "code": "invalid_type",
+          "path": [
+            "status"
+          ],
+          "message": "Please select an invoice status."
+        }
+      ]
+     */
+    console.log(validatedFields.error);
+    return {
+      errors: validatedFields.error.flatten().fieldErrors,
+      message: "Missing Fields. Failed to Create Invoice.",
+    };
+  }
+
+  // Prepare data for insertion into the database
+  const { customerId, amount, status } = validatedFields.data;
   const amountInCents = amount * 100;
   const date = new Date().toISOString().split("T")[0];
 
+  // Insert data into the database
   try {
     await sql`
       INSERT INTO invoices (customer_id, amount, status, date)
       VALUES (${customerId}, ${amountInCents}, ${status}, ${date})
     `;
   } catch (error) {
-    // We'll log the error to the console for now
-    console.error(error);
+    // If a database error occurs, return a more specific error.
+    return {
+      message: "Database Error: Failed to Create Invoice.",
+    };
   }
 
+  // Revalidate the cache for the invoices page and redirect the user.
   revalidatePath("/dashboard/invoices");
   redirect("/dashboard/invoices");
 }
 
-export async function updateInvoice(id: string, formData: FormData) {
-  const { customerId, amount, status } = UpdateInvoice.parse({
+export async function updateInvoice(id: string, prevState: State, formData: FormData) {
+  const validatedFields = UpdateInvoice.safeParse({
     customerId: formData.get("customerId"),
     amount: formData.get("amount"),
     status: formData.get("status"),
   });
 
+  if (!validatedFields.success) {
+    return {
+      errors: validatedFields.error.flatten().fieldErrors,
+      message: "Missing Fields. Failed to Update Invoice.",
+    };
+  }
+
+  const { customerId, amount, status } = validatedFields.data;
   const amountInCents = amount * 100;
 
   try {
@@ -55,8 +128,9 @@ export async function updateInvoice(id: string, formData: FormData) {
         WHERE id = ${id}
       `;
   } catch (error) {
-    // We'll log the error to the console for now
-    console.error(error);
+    return {
+      message: "Database Error: Failed to Update Invoice.",
+    };
   }
 
   revalidatePath("/dashboard/invoices");
@@ -64,8 +138,6 @@ export async function updateInvoice(id: string, formData: FormData) {
 }
 
 export async function deleteInvoice(id: string) {
-  // throw new Error("Failed to Delete Invoice");
-
   await sql`DELETE FROM invoices WHERE id = ${id}`;
   revalidatePath("/dashboard/invoices");
 }
